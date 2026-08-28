@@ -1,0 +1,222 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ──────────────────────────────────────────────
+// Users & Auth (Google OAuth only)
+// ──────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  googleId  String   @unique
+  name      String?
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  dataRooms      DataRoom[]       @relation("DataRoomOwner")
+  sharesGranted  Share[]          @relation("ShareGrantor")
+  sharesReceived ShareGrantee[]   @relation("ShareRecipient")
+  accessLogs     ShareAccessLog[]
+  refreshTokens  RefreshToken[]
+  uploadedFiles  File[]
+
+  @@index([email])
+}
+
+// Hashed refresh tokens, so a session can be revoked server-side
+// (logout-everywhere, compromised-token invalidation) instead of
+// relying purely on client-side cookie deletion.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ──────────────────────────────────────────────
+// Data Room — top-level container (the "Drive")
+// ──────────────────────────────────────────────
+
+model DataRoom {
+  id      String @id @default(uuid())
+  name    String
+  ownerId String
+  owner   User   @relation("DataRoomOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  // Denormalized aggregate stats for the whole room subtree.
+  // Maintained incrementally by TreeService on every mutation
+  // (upload/delete/move) instead of recomputed via recursive SUM.
+  totalSize BigInt @default(0)
+  itemCount Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  folders Folder[]
+  files   File[]
+  shares  Share[]
+
+  @@index([ownerId])
+}
+
+// ──────────────────────────────────────────────
+// Folder — self-referencing tree, materialized path
+// ──────────────────────────────────────────────
+
+model Folder {
+  id         String   @id @default(uuid())
+  name       String
+  dataRoomId String
+  dataRoom   DataRoom @relation(fields: [dataRoomId], references: [id], onDelete: Cascade)
+
+  parentId String?
+  parent   Folder?  @relation("FolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children Folder[] @relation("FolderTree")
+
+  // Materialized path of ancestor IDs, e.g. "/root-id/child-id/".
+  // Enables O(1) "is X inside Y" checks and single-query subtree
+  // reads (`path LIKE '/root-id/%'`) instead of recursive CTEs
+  // for every listing / move / delete.
+  path String
+
+  // Denormalized subtree aggregates (see DataRoom.totalSize comment)
+  totalSize BigInt @default(0)
+  itemCount Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  files  File[]
+  shares Share[]
+
+  @@unique([parentId, name])
+  @@index([dataRoomId])
+  @@index([parentId])
+  @@index([path])
+}
+
+// ──────────────────────────────────────────────
+// File
+// ──────────────────────────────────────────────
+
+model File {
+  id         String @id @default(uuid())
+  name       String
+  mimeType   String
+  size       BigInt
+  storageKey String // object key in Cloudflare R2
+
+  dataRoomId String
+  dataRoom   DataRoom @relation(fields: [dataRoomId], references: [id], onDelete: Cascade)
+
+  folderId String? // null = lives at Data Room root
+  folder   Folder? @relation(fields: [folderId], references: [id], onDelete: Cascade)
+
+  uploadedById String?
+  uploadedBy   User?   @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  versions FileVersion[]
+  shares   Share[]
+
+  @@unique([folderId, name])
+  @@index([dataRoomId])
+  @@index([folderId])
+}
+
+// Extra-credit: file versioning on name conflicts
+model FileVersion {
+  id         String   @id @default(uuid())
+  fileId     String
+  file       File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  versionNum Int
+  storageKey String
+  size       BigInt
+  createdAt  DateTime @default(now())
+
+  @@unique([fileId, versionNum])
+}
+
+// ──────────────────────────────────────────────
+// Sharing — polymorphic target (DataRoom | Folder | File)
+// ──────────────────────────────────────────────
+
+model Share {
+  id String @id @default(uuid())
+
+  // Exactly one of these three is set — enforced at service layer.
+  dataRoomId String?
+  dataRoom   DataRoom? @relation(fields: [dataRoomId], references: [id], onDelete: Cascade)
+  folderId   String?
+  folder     Folder?   @relation(fields: [folderId], references: [id], onDelete: Cascade)
+  fileId     String?
+  file       File?     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  mode  ShareMode
+  token String    @unique // opaque public-link token, also used as the share URL slug
+
+  // Role is modeled now even though MVP only issues VIEWER, so adding
+  // editor support later is an enum extension + guard change, not a
+  // schema remodel (see README "How it scales").
+  role ShareRole @default(VIEWER)
+
+  grantedById String
+  grantedBy   User   @relation("ShareGrantor", fields: [grantedById], references: [id], onDelete: Cascade)
+
+  grantees   ShareGrantee[] // empty for PUBLIC_LINK mode
+  accessLogs ShareAccessLog[]
+
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([token])
+  @@index([dataRoomId])
+  @@index([folderId])
+  @@index([fileId])
+}
+
+enum ShareMode {
+  PUBLIC_LINK
+  PERMISSIONED
+}
+
+enum ShareRole {
+  VIEWER
+  EDITOR // reserved for future use — MVP only issues VIEWER
+}
+
+model ShareGrantee {
+  id      String @id @default(uuid())
+  shareId String
+  share   Share  @relation(fields: [shareId], references: [id], onDelete: Cascade)
+  userId  String
+  user    User   @relation("ShareRecipient", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([shareId, userId])
+}
+
+// Lightweight audit trail — "who viewed this shared item and when"
+model ShareAccessLog {
+  id         String   @id @default(uuid())
+  shareId    String
+  share      Share    @relation(fields: [shareId], references: [id], onDelete: Cascade)
+  userId     String? // null for anonymous public-link viewers
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  accessedAt DateTime @default(now())
+
+  @@index([shareId])
+}
