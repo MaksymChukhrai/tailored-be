@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import cookieParser = require('cookie-parser');
 import { AppModule } from './app.module';
 import type { AppConfig } from './config/configuration';
+import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
 async function bootstrap(): Promise<void> {
   const logger = new Logger('Bootstrap');
@@ -28,8 +29,10 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
+  app.useGlobalFilters(new HttpExceptionFilter());
+
   await app.listen(port);
-  logger.log(`Application is running on port ${port}`);
+    logger.log(`🚀 Application is running on port ${port}`);
 }
 
 bootstrap().catch((error: unknown) => {

@@ -16,9 +16,9 @@ export class PrismaService
   public async onModuleInit(): Promise<void> {
     try {
       await this.$connect();
-      this.logger.log('Connected to PostgreSQL via Prisma');
+            this.logger.log('🗄️  Connected to PostgreSQL via Prisma');
     } catch (error: unknown) {
-      this.logger.error('Failed to connect to the database', error);
+            this.logger.error('Failed to connect to the database', error);
       throw error;
     }
   }
