@@ -44,7 +44,7 @@ export class FilesController {
     return this.filesService.upload(user.sub, {
       dataRoomId,
       folderId,
-      originalName: file.originalname,
+      originalName: Buffer.from(file.originalname, "latin1").toString("utf8"),
       mimeType: file.mimetype,
       buffer: file.buffer,
     });
