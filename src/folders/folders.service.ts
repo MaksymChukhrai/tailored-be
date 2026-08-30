@@ -6,13 +6,13 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-} from '@nestjs/common';
-import { Folder } from '@prisma/client';
-import { AccessControlService } from '../access-control/access-control.service';
-import { PrismaService } from '../prisma/prisma.service';
-import { TreeService } from '../tree/tree.service';
-import { STORAGE_PROVIDER } from '../storage/storage.interface';
-import type { StorageProvider } from '../storage/storage.interface';
+} from "@nestjs/common";
+import { Folder } from "@prisma/client";
+import { AccessControlService } from "../access-control/access-control.service";
+import { PrismaService } from "../prisma/prisma.service";
+import { TreeService } from "../tree/tree.service";
+import { STORAGE_PROVIDER } from "../storage/storage.interface";
+import type { StorageProvider } from "../storage/storage.interface";
 
 export interface FolderContents {
   folder: Folder;
@@ -52,21 +52,27 @@ export class FoldersService {
       where: { id: params.dataRoomId },
     });
     if (!dataRoom) {
-      throw new NotFoundException('Data room not found');
+      throw new NotFoundException("Data room not found");
     }
     if (dataRoom.ownerId !== userId) {
-      throw new ForbiddenException('You do not have access to this data room');
+      throw new ForbiddenException("You do not have access to this data room");
     }
 
     let parent: Folder | null = null;
     if (params.parentId) {
-      parent = await this.prisma.folder.findUnique({ where: { id: params.parentId } });
+      parent = await this.prisma.folder.findUnique({
+        where: { id: params.parentId },
+      });
       if (!parent || parent.dataRoomId !== params.dataRoomId) {
-        throw new NotFoundException('Parent folder not found');
+        throw new NotFoundException("Parent folder not found");
       }
     }
 
-    await this.assertNameAvailable(params.dataRoomId, params.parentId ?? null, params.name);
+    await this.assertNameAvailable(
+      params.dataRoomId,
+      params.parentId ?? null,
+      params.name,
+    );
 
     try {
       return await this.prisma.$transaction(async (tx) => {
@@ -75,7 +81,7 @@ export class FoldersService {
             name: params.name,
             dataRoomId: params.dataRoomId,
             parentId: params.parentId ?? null,
-            path: '', // placeholder, filled in immediately below
+            path: "", // placeholder, filled in immediately below
           },
         });
 
@@ -88,24 +94,33 @@ export class FoldersService {
         return updated;
       });
     } catch (error: unknown) {
-      this.logger.error('Failed to create folder', error);
+      this.logger.error("Failed to create folder", error);
       throw error;
     }
   }
 
-  public async getContents(folderId: string, userId?: string): Promise<FolderContents> {
+  public async getContents(
+    folderId: string,
+    userId?: string,
+  ): Promise<FolderContents> {
     await this.accessControl.assertCanViewFolder(folderId, userId);
     const folder = await this.findByIdOrThrow(folderId);
 
     const [subfolders, files, breadcrumbs] = await Promise.all([
       this.prisma.folder.findMany({
         where: { parentId: folderId },
-        orderBy: { name: 'asc' },
+        orderBy: { name: "asc" },
       }),
       this.prisma.file.findMany({
         where: { folderId },
-        orderBy: { name: 'asc' },
-        select: { id: true, name: true, mimeType: true, size: true, createdAt: true },
+        orderBy: { name: "asc" },
+        select: {
+          id: true,
+          name: true,
+          mimeType: true,
+          size: true,
+          createdAt: true,
+        },
       }),
       this.buildBreadcrumbs(folder),
     ]);
@@ -113,10 +128,19 @@ export class FoldersService {
     return { folder, breadcrumbs, subfolders, files };
   }
 
-  public async rename(folderId: string, userId: string, name: string): Promise<Folder> {
+  public async rename(
+    folderId: string,
+    userId: string,
+    name: string,
+  ): Promise<Folder> {
     const folder = await this.findByIdOrThrow(folderId);
     await this.assertDataRoomOwner(folder.dataRoomId, userId);
-    await this.assertNameAvailable(folder.dataRoomId, folder.parentId, name, folderId);
+    await this.assertNameAvailable(
+      folder.dataRoomId,
+      folder.parentId,
+      name,
+      folderId,
+    );
 
     try {
       return await this.prisma.folder.update({
@@ -139,12 +163,19 @@ export class FoldersService {
 
     let targetParent: Folder | null = null;
     if (targetParentId) {
-      targetParent = await this.prisma.folder.findUnique({ where: { id: targetParentId } });
+      targetParent = await this.prisma.folder.findUnique({
+        where: { id: targetParentId },
+      });
       if (!targetParent || targetParent.dataRoomId !== folder.dataRoomId) {
-        throw new NotFoundException('Target folder not found');
+        throw new NotFoundException("Target folder not found");
       }
-      if (targetParentId === folderId || this.tree.pathContainsId(targetParent.path, folderId)) {
-        throw new BadRequestException('Cannot move a folder into itself or its own subfolder');
+      if (
+        targetParentId === folderId ||
+        this.tree.pathContainsId(targetParent.path, folderId)
+      ) {
+        throw new BadRequestException(
+          "Cannot move a folder into itself or its own subfolder",
+        );
       }
     }
 
@@ -155,9 +186,16 @@ export class FoldersService {
       folderId,
     );
 
+    const sourceParent = folder.parentId
+      ? await this.prisma.folder.findUnique({ where: { id: folder.parentId } })
+      : null;
+
     try {
       return await this.prisma.$transaction(async (tx) => {
-        const newPath = this.tree.buildChildPath(targetParent?.path ?? null, folder.id);
+        const newPath = this.tree.buildChildPath(
+          targetParent?.path ?? null,
+          folder.id,
+        );
 
         const updated = await tx.folder.update({
           where: { id: folderId },
@@ -177,6 +215,21 @@ export class FoldersService {
             data: { path: rewritten },
           });
         }
+
+        // The moved folder's own aggregates travel with it: remove its
+        // totalSize/itemCount from the old ancestor chain, add them to the new one.
+        await this.tree.applyDelta(tx, {
+          dataRoomId: folder.dataRoomId,
+          folderPath: sourceParent?.path ?? null,
+          sizeDelta: -folder.totalSize,
+          countDelta: -folder.itemCount,
+        });
+        await this.tree.applyDelta(tx, {
+          dataRoomId: folder.dataRoomId,
+          folderPath: targetParent?.path ?? null,
+          sizeDelta: folder.totalSize,
+          countDelta: folder.itemCount,
+        });
 
         return updated;
       });
@@ -228,7 +281,9 @@ export class FoldersService {
       await this.prisma.folder.delete({ where: { id: folderId } });
 
       if (filesToDelete.length > 0) {
-        await this.storage.deleteMany(filesToDelete.map((file) => file.storageKey));
+        await this.storage.deleteMany(
+          filesToDelete.map((file) => file.storageKey),
+        );
       }
     } catch (error: unknown) {
       this.logger.error(`Failed to delete folder ${folderId}`, error);
@@ -239,15 +294,20 @@ export class FoldersService {
   private async findByIdOrThrow(id: string): Promise<Folder> {
     const folder = await this.prisma.folder.findUnique({ where: { id } });
     if (!folder) {
-      throw new NotFoundException('Folder not found');
+      throw new NotFoundException("Folder not found");
     }
     return folder;
   }
 
-  private async assertDataRoomOwner(dataRoomId: string, userId: string): Promise<void> {
-    const dataRoom = await this.prisma.dataRoom.findUnique({ where: { id: dataRoomId } });
+  private async assertDataRoomOwner(
+    dataRoomId: string,
+    userId: string,
+  ): Promise<void> {
+    const dataRoom = await this.prisma.dataRoom.findUnique({
+      where: { id: dataRoomId },
+    });
     if (!dataRoom || dataRoom.ownerId !== userId) {
-      throw new ForbiddenException('You do not have access to this data room');
+      throw new ForbiddenException("You do not have access to this data room");
     }
   }
 
@@ -275,7 +335,7 @@ export class FoldersService {
   private async buildBreadcrumbs(
     folder: Folder,
   ): Promise<Array<{ id: string; name: string }>> {
-    const ancestorIds = folder.path.split('/').filter(Boolean);
+    const ancestorIds = folder.path.split("/").filter(Boolean);
     if (ancestorIds.length === 0) {
       return [];
     }
