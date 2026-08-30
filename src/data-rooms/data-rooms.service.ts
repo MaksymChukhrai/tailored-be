@@ -4,12 +4,12 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-} from '@nestjs/common';
-import { DataRoom } from '@prisma/client';
-import { AccessControlService } from '../access-control/access-control.service';
-import { PrismaService } from '../prisma/prisma.service';
-import { STORAGE_PROVIDER } from '../storage/storage.interface';
-import type { StorageProvider } from '../storage/storage.interface';
+} from "@nestjs/common";
+import { DataRoom, Folder, File } from "@prisma/client";
+import { AccessControlService } from "../access-control/access-control.service";
+import { PrismaService } from "../prisma/prisma.service";
+import { STORAGE_PROVIDER } from "../storage/storage.interface";
+import type { StorageProvider } from "../storage/storage.interface";
 
 export interface DataRoomSummary extends DataRoom {
   rootFolderCount: number;
@@ -18,14 +18,8 @@ export interface DataRoomSummary extends DataRoom {
 
 export interface DataRoomRootContents {
   dataRoom: DataRoom;
-  subfolders: Array<{ id: string; name: string }>;
-  files: Array<{
-    id: string;
-    name: string;
-    mimeType: string;
-    size: bigint;
-    createdAt: Date;
-  }>;
+  subfolders: Folder[];
+  files: File[];
 }
 
 @Injectable()
@@ -44,7 +38,10 @@ export class DataRoomsService {
         data: { name, ownerId },
       });
     } catch (error: unknown) {
-      this.logger.error(`Failed to create data room for user ${ownerId}`, error);
+      this.logger.error(
+        `Failed to create data room for user ${ownerId}`,
+        error,
+      );
       throw error;
     }
   }
@@ -55,10 +52,14 @@ export class DataRoomsService {
         where: {
           OR: [
             { ownerId: userId },
-            { shares: { some: { grantees: { some: { userId } }, revokedAt: null } } },
+            {
+              shares: {
+                some: { grantees: { some: { userId } }, revokedAt: null },
+              },
+            },
           ],
         },
-        orderBy: { updatedAt: 'desc' },
+        orderBy: { updatedAt: "desc" },
       });
     } catch (error: unknown) {
       this.logger.error(`Failed to list data rooms for user ${userId}`, error);
@@ -88,20 +89,22 @@ export class DataRoomsService {
     const [subfolders, files] = await Promise.all([
       this.prisma.folder.findMany({
         where: { dataRoomId, parentId: null },
-        orderBy: { name: 'asc' },
-        select: { id: true, name: true },
+        orderBy: { name: "asc" },
       }),
       this.prisma.file.findMany({
         where: { dataRoomId, folderId: null },
-        orderBy: { name: 'asc' },
-        select: { id: true, name: true, mimeType: true, size: true, createdAt: true },
+        orderBy: { name: "asc" },
       }),
     ]);
 
     return { dataRoom, subfolders, files };
   }
 
-  public async rename(id: string, userId: string, name: string): Promise<DataRoom> {
+  public async rename(
+    id: string,
+    userId: string,
+    name: string,
+  ): Promise<DataRoom> {
     const dataRoom = await this.findByIdOrThrow(id);
     this.assertOwner(dataRoom, userId);
 
@@ -140,14 +143,14 @@ export class DataRoomsService {
   private async findByIdOrThrow(id: string): Promise<DataRoom> {
     const dataRoom = await this.prisma.dataRoom.findUnique({ where: { id } });
     if (!dataRoom) {
-      throw new NotFoundException('Data room not found');
+      throw new NotFoundException("Data room not found");
     }
     return dataRoom;
   }
 
   private assertOwner(dataRoom: DataRoom, userId: string): void {
     if (dataRoom.ownerId !== userId) {
-      throw new ForbiddenException('You do not have access to this data room');
+      throw new ForbiddenException("You do not have access to this data room");
     }
   }
 }
