@@ -65,7 +65,8 @@ be/
 │   │                          (NestJS, Prisma, unexpected) into one JSON shape
 │   ├── config/                Typed configuration + environment validation (Joi)
 │   ├── data-rooms/            Data Room CRUD — the top-level container per user
-│   ├── files/                 Upload, download (signed URL), rename, move, delete
+│   ├── files/                 Upload, download (signed URL), rename, move, delete,
+│   │                          cross-room search by name
 │   ├── folders/               Nested folder CRUD, breadcrumbs, move, delete-preview
 │   ├── health/                Root health-check endpoint
 │   ├── prisma/                PrismaClient wrapped as an injectable NestJS service
@@ -114,8 +115,7 @@ Reads never walk the tree: `totalSize` and `itemCount` are columns on `Folder`/`
 
 **What changes at 100,000 files in one Data Room**
 - **Listing**: current folder listings already query by `folderId`/`parentId`, which is indexed — this holds at scale. What's missing for a UI at that size is cursor-based pagination on the listing endpoints (currently they return the full folder/file arrays); switching to `cursor` + `take` on `id` or `createdAt` avoids the cost and inconsistency of offset pagination on a frequently-changing table.
-- **Indexes**: `Folder` and `File` already carry indexes on `dataRoomId`, `parentId`/`folderId`, and `path`. At 100k+ files, a composite index on `(dataRoomId, folderId, name)` would speed up the name-conflict checks that currently run on every create/rename/move.
-- **Search**: the "search by file name" extra-credit feature would need a `pg_trgm` GIN index (or an external search index) rather than `LIKE` scans once the table grows past low tens of thousands of rows.
+- **Indexes**: `Folder` and `File` already carry indexes on `dataRoomId`, `parentId`/`folderId`, `path`, and `name`. At 100k+ files, a `pg_trgm` GIN index on `File.name` would replace the current B-tree index for the `ILIKE '%query%'` search, since a plain B-tree only accelerates prefix matches (`LIKE 'query%'`), not substring matches — the current index still helps `ORDER BY name` listings and exact-match lookups, but a full-text scan is the honest cost of substring search at that scale without `pg_trgm`. A composite index on `(dataRoomId, folderId, name)` would also speed up the name-conflict checks that currently run on every create/rename/move.
 
 **Extending sharing to per-user roles (viewer/editor) without remodeling**
 The schema already stores `Share.role` as an enum with `VIEWER` and `EDITOR` values — the MVP simply never issues `EDITOR`. Adding real editor support is a guard-logic change, not a schema migration: `AccessControlService` would grow a second method (`assertCanEdit`) that additionally checks `share.role === EDITOR`, and the write endpoints in `folders`/`files` controllers would accept that check as an alternative to strict ownership. No new tables or columns are needed.
@@ -129,6 +129,7 @@ The schema already stores `Share.role` as an enum with `VIEWER` and `EDITOR` val
 - **Automatic name-conflict resolution for files** (`report.pdf` → `report (1).pdf`), matching the behavior of common file managers, versus a hard rejection for folders — files are uploaded in bulk and blocking on every conflict would break the multi-upload flow described in the spec; folders are created one at a time by explicit user action, so surfacing the conflict directly is more useful.
 - **Soft revoke for shares** (`revokedAt` timestamp) rather than deletion — preserves the access log and produces a clear "this link was revoked" state instead of an ambiguous 404.
 - **Deleting a folder that's being viewed via a share** — cascading deletes remove the folder, its contents, and any `Share` rows targeting it in the same operation. A viewer polling that share afterward gets a clean `404 Not Found` from the global exception filter, not a partial or broken response.
+- **File search is scoped across every accessible Data Room, not just one** — `GET /files/search` filters by every `dataRoomId` the user owns or has a live share on (the same set `GET /data-rooms` already computes), rather than requiring a `dataRoomId` in the query. In a due-diligence workflow the user often remembers a document's name but not which room it was filed under, so a per-room search would just relocate the problem instead of solving it. The tradeoff is a slightly heavier query (an `IN` over the accessible room IDs before the name filter); at this scale that's cheaper than the alternative of the user manually checking every room.
 
 ## Local Setup
 
