@@ -20,7 +20,9 @@ import { Public } from '../auth/decorators/public.decorator';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import type { JwtPayload } from '../auth/strategies/jwt-access.strategy';
 import { MoveFileDto } from './dto/move-file.dto';
+import { SearchFilesDto } from './dto/search-files.dto';
 import { UpdateFileDto } from './dto/update-file.dto';
+import type { FileSearchResult } from './files.service';
 import { FilesService } from './files.service';
 
 interface UploadedMulterFile {
@@ -48,6 +50,14 @@ export class FilesController {
       mimeType: file.mimetype,
       buffer: file.buffer,
     });
+  }
+
+  @Get('search')
+  public search(
+    @CurrentUser() user: JwtPayload,
+    @Query() dto: SearchFilesDto,
+  ): Promise<FileSearchResult[]> {
+    return this.filesService.search(user.sub, dto.q);
   }
 
   @Public()

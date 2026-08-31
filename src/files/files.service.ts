@@ -21,6 +21,11 @@ export interface UploadFileParams {
   buffer: Buffer;
 }
 
+export interface FileSearchResult extends File {
+  dataRoomName: string;
+  folderName: string | null;
+}
+
 @Injectable()
 export class FilesService {
   private readonly logger = new Logger(FilesService.name);
@@ -92,6 +97,61 @@ export class FilesService {
       this.logger.error(`Failed to upload file "${params.originalName}"`, error);
       throw error;
     }
+  }
+
+  /**
+   * Searches by file name (case-insensitive substring match) across every
+   * Data Room the user can see — owned or shared with them. Scoped this
+   * way rather than per-room, since in a due-diligence context the user
+   * often remembers a file's name but not which room or folder it lives in.
+   */
+  public async search(userId: string, query: string): Promise<FileSearchResult[]> {
+    try {
+      const accessibleRoomIds = await this.getAccessibleDataRoomIds(userId);
+      if (accessibleRoomIds.length === 0) {
+        return [];
+      }
+
+      const files = await this.prisma.file.findMany({
+        where: {
+          dataRoomId: { in: accessibleRoomIds },
+          name: { contains: query, mode: 'insensitive' },
+        },
+        include: {
+          dataRoom: { select: { name: true } },
+          folder: { select: { name: true } },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 50,
+      });
+
+      return files.map(({ dataRoom, folder, ...file }) => ({
+        ...file,
+        dataRoomName: dataRoom.name,
+        folderName: folder?.name ?? null,
+      }));
+    } catch (error: unknown) {
+      this.logger.error(`Failed to search files for user ${userId}`, error);
+      throw error;
+    }
+  }
+
+  private async getAccessibleDataRoomIds(userId: string): Promise<string[]> {
+    const dataRooms = await this.prisma.dataRoom.findMany({
+      where: {
+        OR: [
+          { ownerId: userId },
+          {
+            shares: {
+              some: { grantees: { some: { userId } }, revokedAt: null },
+            },
+          },
+        ],
+      },
+      select: { id: true },
+    });
+
+    return dataRooms.map((room) => room.id);
   }
 
   public async getDownloadUrl(fileId: string, userId?: string): Promise<string> {

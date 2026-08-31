@@ -137,6 +137,7 @@ model File {
   @@unique([folderId, name])
   @@index([dataRoomId])
   @@index([folderId])
+  @@index([name])
 }
 
 // Extra-credit: file versioning on name conflicts
